@@ -35,19 +35,6 @@ for wrapper in kiro-cli-sub codex-sub agy-sub drovr-spawn-multi; do
   fi
 done
 
-echo ""
-echo "1c. Installing skills..."
-
-SKILLS_DIR="${HOME}/.kiro/skills"
-if [[ -d "${SCRIPT_DIR}/skills" ]]; then
-  for skill_dir in "${SCRIPT_DIR}/skills"/*/; do
-    skill_name=$(basename "$skill_dir")
-    mkdir -p "${SKILLS_DIR}/${skill_name}"
-    ln -sf "${skill_dir}SKILL.md" "${SKILLS_DIR}/${skill_name}/SKILL.md" 2>/dev/null || true
-    echo "   Skill: ${skill_name}"
-  done
-fi
-
 # --- Detect and install hooks ------------------------------------------------
 
 echo ""

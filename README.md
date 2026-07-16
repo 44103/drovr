@@ -170,6 +170,19 @@ herdr's built-in integrations (e.g., `herdr integration install codex`) are **pa
 
 Think of herdr integrations as "hello, I exist" and drovr as "I can operate the workspace."
 
+## Skills
+
+drovr includes skills for herdr integration. Install them per agent as follows.
+
+### Kiro CLI
+
+```bash
+# Install directly from the GitHub repository
+gh skill install 44103/drovr
+```
+
+Skills are placed in `~/.kiro/skills/herdr-subagents/`.
+
 ## License
 
 MIT
