@@ -6,12 +6,12 @@ herdr provides a Socket API for pane management and agent state reporting, but e
 
 ## Supported Agents
 
-| Agent | Passive (hook) | Active (CLI) |
-|-------|:-:|:-:|
-| kiro-cli | hook auto-installed | `drovr agent spawn --cli kiro-cli` |
-| Codex | hook auto-installed | `drovr agent spawn --cli codex` |
-| Claude Code | hook auto-installed | `drovr agent spawn --cli claude` |
-| Any CLI | manual | `drovr agent start <name> -- <cmd>` |
+| Agent | Active (CLI) |
+|-------|:---|
+| kiro-cli | `drovr agent spawn --cli kiro-cli` |
+| Codex | `drovr agent spawn --cli codex` |
+| Claude Code | `drovr agent spawn --cli claude` |
+| Any CLI | `drovr agent start <name> -- <cmd>` |
 
 ## Features
 
@@ -38,7 +38,7 @@ cd ~/workspace/drovr
 
 This will:
 1. Place `drovr` wrapper in `~/.local/bin/`
-2. Install hooks for detected agents (kiro-cli, codex, claude)
+2. Install sub-agent wrappers (`kiro-cli-sub`, `codex-sub`, `agy-sub`, `drovr-spawn-multi`)
 
 Add to PATH if needed:
 ```bash
@@ -150,10 +150,10 @@ drovr pane read $(drovr agent list | grep codex-research | awk '{print $1}') --l
 
 ```
 drovr/
-├── bin/drovr           # Main CLI entry point
+├── bin/drovr            # Main CLI entry point
 ├── lib/herdr-core.sh    # Core library (socket, pane discovery)
-├── hooks/               # Reference hook implementations
-├── install.sh           # Multi-agent installer
+├── skills/              # Agent skills (install via gh skill install)
+├── install.sh           # Installer
 ├── uninstall.sh         # Clean uninstaller
 ├── LICENSE              # MIT
 └── README.md

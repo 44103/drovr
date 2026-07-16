@@ -1,6 +1,6 @@
 #!/bin/bash
 # drovr installer
-# Installs drovr binary to PATH and optionally registers hooks for supported agents.
+# Installs drovr binary and sub-agent wrappers to PATH.
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ echo "   Done: ${INSTALL_DIR}/drovr"
 # --- Install sub-agent wrappers ----------------------------------------------
 
 echo ""
-echo "1b. Installing sub-agent wrappers..."
+echo "2. Installing sub-agent wrappers..."
 
 for wrapper in kiro-cli-sub codex-sub agy-sub drovr-spawn-multi; do
   if [[ -f "${SCRIPT_DIR}/bin/${wrapper}" ]]; then
@@ -34,56 +34,6 @@ for wrapper in kiro-cli-sub codex-sub agy-sub drovr-spawn-multi; do
     echo "   Done: ${INSTALL_DIR}/${wrapper} -> ${SCRIPT_DIR}/bin/${wrapper}"
   fi
 done
-
-# --- Detect and install hooks ------------------------------------------------
-
-echo ""
-echo "2. Installing agent hooks..."
-
-install_kiro_hooks() {
-  local hooks_dir="${HOME}/.kiro/hooks"
-  mkdir -p "$hooks_dir"
-
-  cp "${SCRIPT_DIR}/hooks/kiro/drovr-agent-state.sh" "${hooks_dir}/drovr-agent-state.sh"
-  chmod +x "${hooks_dir}/drovr-agent-state.sh"
-
-  cp "${SCRIPT_DIR}/hooks/kiro/drovr-agent-state.json" "${hooks_dir}/drovr-agent-state.json"
-
-  echo "   kiro-cli: ${hooks_dir}/drovr-agent-state.{sh,json}"
-}
-
-install_codex_hooks() {
-  local hooks_dir="${HOME}/.codex"
-  mkdir -p "$hooks_dir"
-
-  cp "${SCRIPT_DIR}/hooks/codex/drovr-agent-state.sh" "${hooks_dir}/drovr-agent-state.sh"
-  chmod +x "${hooks_dir}/drovr-agent-state.sh"
-
-  echo "   codex: ${hooks_dir}/drovr-agent-state.sh"
-}
-
-install_claude_hooks() {
-  local hooks_dir="${HOME}/.claude/hooks"
-  mkdir -p "$hooks_dir"
-
-  cp "${SCRIPT_DIR}/hooks/claude/drovr-agent-state.sh" "${hooks_dir}/drovr-agent-state.sh"
-  chmod +x "${hooks_dir}/drovr-agent-state.sh"
-
-  echo "   claude: ${hooks_dir}/drovr-agent-state.sh"
-}
-
-# Install hooks for detected agents
-if command -v kiro-cli >/dev/null 2>&1 || [[ -d "${HOME}/.kiro" ]]; then
-  install_kiro_hooks
-fi
-
-if command -v codex >/dev/null 2>&1 || [[ -d "${HOME}/.codex" ]]; then
-  install_codex_hooks
-fi
-
-if command -v claude >/dev/null 2>&1 || [[ -d "${HOME}/.claude" ]]; then
-  install_claude_hooks
-fi
 
 # --- Verify ------------------------------------------------------------------
 
@@ -109,6 +59,3 @@ echo "Sub-agent wrappers (auto-return results to caller pane):"
 echo "  herdr agent start name --split right -- kiro-cli-sub <pane-id> \"prompt\""
 echo "  herdr agent start name --split right -- codex-sub <pane-id> \"prompt\""
 echo "  herdr agent start name --split right -- agy-sub <pane-id> \"prompt\""
-echo ""
-echo "Hooks will automatically report session state to herdr"
-echo "when supported AI agents start and stop."
