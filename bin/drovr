@@ -1,0 +1,693 @@
+#!/usr/bin/env bash
+# drovr: Agent-agnostic CLI wrapper for herdr Socket API.
+# Enables any terminal AI agent to actively operate herdr panes and report state.
+# Usage: drovr <command> [options]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# shellcheck source=../lib/herdr-core.sh
+source "${LIB_DIR}/herdr-core.sh"
+
+# --- Usage -------------------------------------------------------------------
+
+usage() {
+  cat <<EOF
+drovr v${DROVR_VERSION} - herdr Socket API bridge for AI agents
+
+Usage: drovr <command> [options]
+
+Pane Commands:
+  pane list                          List all panes
+  pane current                       Show current pane info
+  pane split [--direction right|down] [--cwd PATH] [--focus]
+                                     Split current pane
+  pane run <pane_id> <command>       Run a command in a pane
+  pane read <pane_id> [--lines N]   Read pane content
+  pane send <pane_id> <text>        Send text to a pane
+  pane close <pane_id>              Close a pane
+
+Agent Commands:
+  agent session <session_id> [source]
+                                     Report agent session (for session start)
+  agent report <state> [--message TEXT]
+                                     Report agent state (idle|working|blocked)
+  agent start <name> [--cwd PATH] [--split right|down] -- <argv...>
+                                     Start a new agent in a new pane
+  agent spawn <name> [--cli CMD] [--cwd PATH] -- "<prompt>"
+                                     Spawn an AI agent CLI in a new pane
+  agent list                         List active agents
+  agent read <target>               Read agent pane content
+  agent send <target> <text>        Send text to an agent
+  agent wait <target> --status <status> [--timeout MS]
+                                     Wait for agent to reach a status
+
+General:
+  status                             Show herdr connection status
+  snapshot                           Show full session snapshot
+  help                               Show this help
+
+Environment:
+  HERDR_SOCKET_PATH   Override socket path
+  HERDR_PANE_ID       Override current pane ID
+  HERDR_AGENT         Agent label (auto-set by herdr)
+  DROVR_CLI          Default CLI for 'agent spawn' (default: auto-detect)
+EOF
+}
+
+# --- Pane Commands -----------------------------------------------------------
+
+cmd_pane_list() {
+  local response result
+  response=$(herdr_rpc "pane.list" '{}')
+  result=$(herdr_result "$response") || return 1
+  python3 - "$result" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+panes = data.get("panes", [])
+if not panes:
+    print("No panes found.")
+    sys.exit(0)
+
+fmt = "{:<12} {:<12} {:<10} {:<8} {}"
+print(fmt.format("PANE_ID", "TAB_ID", "AGENT", "STATUS", "CWD"))
+print("-" * 72)
+for p in panes:
+    print(fmt.format(
+        p.get("pane_id", ""),
+        p.get("tab_id", ""),
+        p.get("agent", "-"),
+        p.get("agent_status", "unknown"),
+        p.get("cwd", ""),
+    ))
+PYTHON
+}
+
+cmd_pane_current() {
+  local response result
+  response=$(herdr_rpc "pane.current" '{}')
+  result=$(herdr_result "$response") || return 1
+  python3 - "$result" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+pane = data.get("pane", {})
+print(json.dumps(pane, indent=2))
+PYTHON
+}
+
+cmd_pane_split() {
+  local direction="right"
+  local cwd=""
+  local focus="false"
+  local pane_id
+  pane_id=$(herdr_current_pane_id)
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --direction) direction="$2"; shift 2 ;;
+      --cwd) cwd="$2"; shift 2 ;;
+      --focus) focus="true"; shift ;;
+      --pane) pane_id="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local params
+  params=$(python3 - "$pane_id" "$direction" "$cwd" "$focus" <<'PYTHON'
+import json, sys
+pane_id, direction, cwd, focus = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+params = {"pane_id": pane_id, "direction": direction}
+if cwd:
+    params["cwd"] = cwd
+if focus == "true":
+    params["focus"] = True
+print(json.dumps(params))
+PYTHON
+  )
+
+  local response result
+  response=$(herdr_rpc "pane.split" "$params")
+  result=$(herdr_result "$response") || return 1
+  python3 - "$result" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+pane = data.get("pane", data)
+pane_id = pane.get("pane_id", "unknown")
+print(f"Created pane: {pane_id}")
+print(json.dumps(pane, indent=2))
+PYTHON
+}
+
+cmd_pane_run() {
+  if [[ $# -lt 2 ]]; then
+    echo "Usage: drovr pane run <pane_id> <command>" >&2
+    return 1
+  fi
+
+  local pane_id="$1"
+  shift
+  local command="$*"
+
+  local params
+  params=$(python3 - "$pane_id" "$command" <<'PYTHON'
+import json, sys
+print(json.dumps({"pane_id": sys.argv[1], "text": sys.argv[2] + "\n"}))
+PYTHON
+  )
+
+  local response
+  response=$(herdr_rpc "pane.send_text" "$params")
+  herdr_result "$response" > /dev/null 2>&1
+  echo "Command sent to pane ${pane_id}: ${command}"
+}
+
+cmd_pane_read() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr pane read <pane_id> [--lines N] [--source visible|recent]" >&2
+    return 1
+  fi
+
+  local pane_id="$1"
+  shift
+  local lines="50"
+  local source_type="recent"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lines) lines="$2"; shift 2 ;;
+      --source) source_type="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local params
+  params=$(python3 - "$pane_id" "$lines" "$source_type" <<'PYTHON'
+import json, sys
+print(json.dumps({
+    "pane_id": sys.argv[1],
+    "lines": int(sys.argv[2]),
+    "source": sys.argv[3],
+    "format": "text"
+}))
+PYTHON
+  )
+
+  local response result
+  response=$(herdr_rpc "pane.read" "$params")
+  result=$(herdr_result "$response") || return 1
+  DROVR_DATA="$result" python3 - <<'PYTHON'
+import json, sys, os
+data = json.loads(os.environ["DROVR_DATA"])
+read_data = data.get("read", data)
+content = read_data.get("text", read_data.get("content", ""))
+if isinstance(content, list):
+    print("\n".join(content))
+else:
+    print(content, end="")
+PYTHON
+}
+
+cmd_pane_send() {
+  if [[ $# -lt 2 ]]; then
+    echo "Usage: drovr pane send <pane_id> <text>" >&2
+    return 1
+  fi
+
+  local pane_id="$1"
+  shift
+  local text="$*"
+
+  local params
+  params=$(python3 - "$pane_id" "$text" <<'PYTHON'
+import json, sys
+print(json.dumps({"pane_id": sys.argv[1], "text": sys.argv[2]}))
+PYTHON
+  )
+
+  local response
+  response=$(herdr_rpc "pane.send_text" "$params")
+  herdr_result "$response" > /dev/null 2>&1
+  echo "Text sent to pane ${pane_id}"
+}
+
+cmd_pane_close() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr pane close <pane_id>" >&2
+    return 1
+  fi
+
+  local pane_id="$1"
+
+  local params
+  params=$(python3 - "$pane_id" <<'PYTHON'
+import json, sys
+print(json.dumps({"pane_id": sys.argv[1]}))
+PYTHON
+  )
+
+  local response
+  response=$(herdr_rpc "pane.close" "$params")
+  herdr_result "$response" > /dev/null 2>&1
+  echo "Pane ${pane_id} closed"
+}
+
+# --- Agent Commands ----------------------------------------------------------
+
+cmd_agent_session() {
+  local session_id="${1:-}"
+  local session_source="${2:-}"
+
+  if [[ -z "$session_id" ]]; then
+    echo "Usage: drovr agent session <session_id> [source]" >&2
+    return 1
+  fi
+
+  local pane_id
+  pane_id=$(herdr_current_pane_id)
+  local seq
+  seq=$(herdr_seq)
+
+  local params
+  params=$(python3 - "$pane_id" "$DROVR_SOURCE" "$DROVR_AGENT" "$session_id" "$session_source" "$seq" <<'PYTHON'
+import json, sys
+pane_id, source, agent, session_id, session_source, seq = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+params = {
+    "pane_id": pane_id,
+    "source": source,
+    "agent": agent,
+    "seq": int(seq),
+    "agent_session_id": session_id,
+}
+if session_source:
+    params["session_start_source"] = session_source
+print(json.dumps(params))
+PYTHON
+  )
+
+  local response
+  response=$(herdr_rpc "pane.report_agent_session" "$params")
+  herdr_result "$response" > /dev/null 2>&1
+  echo "Agent session reported: ${session_id}"
+}
+
+cmd_agent_report() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr agent report <idle|working|blocked> [--message TEXT]" >&2
+    return 1
+  fi
+
+  local state="$1"
+  shift
+  local message=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --message) message="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local pane_id
+  pane_id=$(herdr_current_pane_id)
+  local seq
+  seq=$(herdr_seq)
+
+  local params
+  params=$(python3 - "$pane_id" "$DROVR_SOURCE" "$DROVR_AGENT" "$state" "$message" "$seq" <<'PYTHON'
+import json, sys
+pane_id, source, agent, state, message, seq = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
+params = {
+    "pane_id": pane_id,
+    "source": source,
+    "agent": agent,
+    "state": state,
+    "seq": int(seq),
+}
+if message:
+    params["message"] = message
+print(json.dumps(params))
+PYTHON
+  )
+
+  local response
+  response=$(herdr_rpc "pane.report_agent" "$params")
+  herdr_result "$response" > /dev/null 2>&1
+  echo "Agent state reported: ${state}"
+}
+
+cmd_agent_start() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr agent start <name> [--cwd PATH] [--split right|down] [--no-focus] -- <argv...>" >&2
+    return 1
+  fi
+
+  local name="$1"
+  shift
+  local cwd=""
+  local split="right"
+  local focus="--no-focus"
+  local argv=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2 ;;
+      --split) split="$2"; shift 2 ;;
+      --focus) focus="--focus"; shift ;;
+      --no-focus) focus="--no-focus"; shift ;;
+      --) shift; argv=("$@"); break ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  if [[ ${#argv[@]} -eq 0 ]]; then
+    echo "Error: command argv required after --" >&2
+    return 1
+  fi
+
+  local cmd_args=("herdr" "agent" "start" "$name")
+  if [[ -n "$cwd" ]]; then
+    cmd_args+=("--cwd" "$cwd")
+  fi
+  cmd_args+=("--split" "$split" "$focus" "--" "${argv[@]}")
+
+  local output
+  output=$("${cmd_args[@]}" 2>&1)
+  local rc=$?
+
+  if [[ $rc -ne 0 ]]; then
+    echo "Error starting agent: $output" >&2
+    return $rc
+  fi
+
+  python3 - "$output" <<'PYTHON'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    result = data.get("result", data)
+    agent = result.get("agent", {})
+    pane_id = agent.get("pane_id", "unknown")
+    name = agent.get("name", "unknown")
+    print(f"Agent '{name}' started in pane {pane_id}")
+    print(json.dumps(agent, indent=2))
+except (json.JSONDecodeError, KeyError):
+    print(sys.argv[1])
+PYTHON
+}
+
+cmd_agent_spawn() {
+  # Spawn an AI agent CLI in a new herdr pane (agent-agnostic)
+  if [[ $# -lt 1 ]]; then
+    cat >&2 <<'EOF'
+Usage: drovr agent spawn <name> [options] -- "<prompt>"
+
+Spawns an AI agent CLI session in a new herdr pane.
+
+Options:
+  --cwd PATH          Working directory
+  --split right|down  Split direction (default: right)
+  --cli CMD           CLI to use (default: $DROVR_CLI or auto-detect)
+                      Supported: kiro-cli, codex, claude
+  --agent AGENT       Agent/persona name (passed to CLI if supported)
+  --focus             Focus the new pane
+  --no-focus          Don't focus the new pane (default)
+
+Examples:
+  drovr agent spawn researcher -- "Investigate the auth bug"
+  drovr agent spawn reviewer --cli codex -- "Review security"
+  drovr agent spawn frontend --cli kiro-cli --agent frontend -- "Fix layout"
+  drovr agent spawn analyst --cli claude -- "Analyze dependencies"
+EOF
+    return 1
+  fi
+
+  local name="$1"
+  shift
+  local cwd=""
+  local split="right"
+  local cli="${DROVR_CLI:-}"
+  local agent=""
+  local focus="--no-focus"
+  local prompt=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cwd) cwd="$2"; shift 2 ;;
+      --split) split="$2"; shift 2 ;;
+      --cli) cli="$2"; shift 2 ;;
+      --agent) agent="$2"; shift 2 ;;
+      --focus) focus="--focus"; shift ;;
+      --no-focus) focus="--no-focus"; shift ;;
+      --) shift; prompt="$*"; break ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  if [[ -z "$prompt" ]]; then
+    echo "Error: prompt required after --" >&2
+    return 1
+  fi
+
+  # Auto-detect CLI if not specified
+  if [[ -z "$cli" ]]; then
+    if command -v kiro-cli >/dev/null 2>&1; then
+      cli="kiro-cli"
+    elif command -v codex >/dev/null 2>&1; then
+      cli="codex"
+    elif command -v claude >/dev/null 2>&1; then
+      cli="claude"
+    else
+      echo "Error: no supported AI CLI found. Set --cli or DROVR_CLI." >&2
+      return 1
+    fi
+  fi
+
+  # Build CLI-specific command
+  local cli_args=()
+  case "$cli" in
+    kiro-cli)
+      cli_args=("kiro-cli" "chat" "--no-interactive" "--trust-all-tools")
+      if [[ -n "$agent" ]]; then
+        cli_args+=("--agent" "$agent")
+      fi
+      cli_args+=("$prompt")
+      ;;
+    codex)
+      cli_args=("codex" "exec")
+      if [[ -n "$agent" ]]; then
+        cli_args+=("--agent" "$agent")
+      fi
+      cli_args+=("$prompt")
+      ;;
+    claude)
+      cli_args=("claude" "--dangerously-skip-permissions" "-p" "$prompt")
+      ;;
+    *)
+      # Generic fallback: assume CLI accepts prompt as last arg
+      cli_args=("$cli" "$prompt")
+      ;;
+  esac
+
+  # Start via herdr agent start
+  local cmd_args=("herdr" "agent" "start" "$name")
+  if [[ -n "$cwd" ]]; then
+    cmd_args+=("--cwd" "$cwd")
+  fi
+  cmd_args+=("--split" "$split" "$focus" "--" "${cli_args[@]}")
+
+  local output
+  output=$("${cmd_args[@]}" 2>&1)
+  local rc=$?
+
+  if [[ $rc -ne 0 ]]; then
+    echo "Error spawning agent: $output" >&2
+    return $rc
+  fi
+
+  python3 - "$output" "$name" "$cli" <<'PYTHON'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    result = data.get("result", data)
+    agent = result.get("agent", {})
+    pane_id = agent.get("pane_id", "unknown")
+    name = sys.argv[2]
+    cli = sys.argv[3]
+    print(f"{cli} agent '{name}' spawned in pane {pane_id}")
+    print(f"  Monitor: drovr agent read {name}")
+    print(f"  Wait:    drovr agent wait {name} --status idle")
+    print(f"  Send:    drovr agent send {name} '<text>'")
+except (json.JSONDecodeError, KeyError):
+    print(sys.argv[1])
+PYTHON
+}
+
+cmd_agent_list() {
+  local output
+  output=$(herdr agent list 2>&1)
+  python3 - "$output" <<'PYTHON'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    result = data.get("result", data)
+    agents = result.get("agents", [])
+    if not agents:
+        print("No active agents.")
+        sys.exit(0)
+    fmt = "{:<12} {:<16} {:<10} {:<8} {}"
+    print(fmt.format("PANE_ID", "NAME", "AGENT", "STATUS", "CWD"))
+    print("-" * 76)
+    for a in agents:
+        print(fmt.format(
+            a.get("pane_id", ""),
+            a.get("name", "-"),
+            a.get("agent", "-"),
+            a.get("agent_status", "unknown"),
+            a.get("cwd", ""),
+        ))
+except (json.JSONDecodeError, KeyError):
+    print(sys.argv[1])
+PYTHON
+}
+
+cmd_agent_read() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr agent read <target> [--lines N]" >&2
+    return 1
+  fi
+
+  local target="$1"
+  shift
+  local lines=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --lines) lines="$2"; shift 2 ;;
+      *) echo "Unknown option: $1" >&2; return 1 ;;
+    esac
+  done
+
+  local cmd_args=("herdr" "agent" "read" "$target")
+  if [[ -n "$lines" ]]; then
+    cmd_args+=("--lines" "$lines")
+  fi
+  "${cmd_args[@]}" 2>&1
+}
+
+cmd_agent_send() {
+  if [[ $# -lt 2 ]]; then
+    echo "Usage: drovr agent send <target> <text>" >&2
+    return 1
+  fi
+
+  local target="$1"
+  shift
+  local text="$*"
+
+  herdr agent send "$target" "$text" 2>&1
+}
+
+cmd_agent_wait() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: drovr agent wait <target> --status <status> [--timeout MS]" >&2
+    return 1
+  fi
+
+  local target="$1"
+  shift
+
+  herdr agent wait "$target" "$@" 2>&1
+}
+
+# --- General Commands --------------------------------------------------------
+
+cmd_status() {
+  local socket_path
+  socket_path=$(herdr_socket_path 2>/dev/null) || true
+  local pane_id
+  pane_id=$(herdr_current_pane_id 2>/dev/null) || true
+
+  echo "drovr v${DROVR_VERSION}"
+  echo ""
+  echo "Connection:"
+  if [[ -n "$socket_path" ]]; then
+    echo "  Socket: ${socket_path} (connected)"
+  else
+    echo "  Socket: not found"
+  fi
+  echo "  Pane ID: ${pane_id:-unknown}"
+  echo "  Agent: ${DROVR_AGENT}"
+  echo ""
+  echo "Environment:"
+  echo "  HERDR_SOCKET_PATH: ${HERDR_SOCKET_PATH:-<not set>}"
+  echo "  HERDR_PANE_ID: ${HERDR_PANE_ID:-<not set>}"
+  echo "  HERDR_AGENT: ${HERDR_AGENT:-<not set>}"
+  echo "  DROVR_CLI: ${DROVR_CLI:-<not set, auto-detect>}"
+}
+
+cmd_snapshot() {
+  local response result
+  response=$(herdr_rpc "session.snapshot" '{}')
+  result=$(herdr_result "$response") || return 1
+  echo "$result" | python3 -m json.tool
+}
+
+# --- Main Dispatch -----------------------------------------------------------
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+  fi
+
+  local command="$1"
+  shift
+
+  case "$command" in
+    pane)
+      if [[ $# -eq 0 ]]; then
+        echo "Usage: drovr pane <list|current|split|run|read|send|close>" >&2
+        exit 1
+      fi
+      local subcmd="$1"
+      shift
+      case "$subcmd" in
+        list) cmd_pane_list "$@" ;;
+        current) cmd_pane_current "$@" ;;
+        split) cmd_pane_split "$@" ;;
+        run) cmd_pane_run "$@" ;;
+        read) cmd_pane_read "$@" ;;
+        send) cmd_pane_send "$@" ;;
+        close) cmd_pane_close "$@" ;;
+        *) echo "Unknown pane command: $subcmd" >&2; exit 1 ;;
+      esac
+      ;;
+    agent)
+      if [[ $# -eq 0 ]]; then
+        echo "Usage: drovr agent <session|report|start|spawn|list|read|send|wait>" >&2
+        exit 1
+      fi
+      local subcmd="$1"
+      shift
+      case "$subcmd" in
+        session) cmd_agent_session "$@" ;;
+        report) cmd_agent_report "$@" ;;
+        start) cmd_agent_start "$@" ;;
+        spawn) cmd_agent_spawn "$@" ;;
+        list) cmd_agent_list "$@" ;;
+        read) cmd_agent_read "$@" ;;
+        send) cmd_agent_send "$@" ;;
+        wait) cmd_agent_wait "$@" ;;
+        *) echo "Unknown agent command: $subcmd" >&2; exit 1 ;;
+      esac
+      ;;
+    status) cmd_status "$@" ;;
+    snapshot) cmd_snapshot "$@" ;;
+    help|--help|-h) usage ;;
+    version|--version|-V) echo "drovr v${DROVR_VERSION}" ;;
+    *) echo "Unknown command: $command" >&2; usage; exit 1 ;;
+  esac
+}
+
+main "$@"

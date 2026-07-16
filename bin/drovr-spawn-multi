@@ -1,0 +1,134 @@
+#!/bin/bash
+# drovr-spawn-multi: Spawn multiple sub-agents with automatic layout
+#
+# Layout: main pane (top 40%) + sub panes (bottom 60%, equally split horizontally)
+#
+# Usage:
+#   drovr-spawn-multi <wrapper:prompt> [<wrapper:prompt> ...]
+#   drovr-spawn-multi clean                    # Close all sub panes
+#
+# Examples:
+#   drovr-spawn-multi \
+#     "kiro-cli-sub:天気を調べて" \
+#     "codex-sub:持ち物リスト" \
+#     "agy-sub:コースを提案して"
+#
+#   drovr-spawn-multi clean
+
+set -eu
+
+# --- Clean subcommand ---
+if [ "${1:-}" = "clean" ]; then
+  MAIN_PANE=$(drovr pane current 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['pane_id'])" 2>/dev/null || echo "")
+  if [ -z "$MAIN_PANE" ]; then
+    echo "Error: Cannot determine current pane ID" >&2
+    exit 1
+  fi
+  
+  # Close all panes except main
+  PANES_TO_CLOSE=$(drovr pane list 2>/dev/null | awk -v main="$MAIN_PANE" '$1 != main && $1 != "PANE_ID" && $1 != "---" {print $1}')
+  if [ -z "$PANES_TO_CLOSE" ]; then
+    echo "No sub panes to close."
+    exit 0
+  fi
+  
+  COUNT=0
+  for PANE in $PANES_TO_CLOSE; do
+    herdr pane close "$PANE" >/dev/null 2>&1 && ((COUNT++)) || true
+  done
+  echo "Closed $COUNT sub pane(s)."
+  exit 0
+fi
+
+# --- Help ---
+if [ $# -eq 0 ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  echo "Usage: drovr-spawn-multi <wrapper:prompt> [<wrapper:prompt> ...]"
+  echo "       drovr-spawn-multi clean"
+  echo ""
+  echo "Each argument is 'wrapper:prompt' where wrapper is kiro-cli-sub, codex-sub, or agy-sub"
+  echo ""
+  echo "Commands:"
+  echo "  clean   Close all sub panes (keep main pane only)"
+  echo ""
+  echo "Example:"
+  echo '  drovr-spawn-multi "kiro-cli-sub:天気を調べて" "codex-sub:持ち物" "agy-sub:コース"'
+  exit 1
+fi
+
+# --- Spawn subcommand ---
+NUM_AGENTS=$#
+MAIN_PANE=$(drovr pane current 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['pane_id'])" 2>/dev/null || echo "")
+
+if [ -z "$MAIN_PANE" ]; then
+  echo "Error: Cannot determine current pane ID" >&2
+  exit 1
+fi
+
+# Clean existing sub panes first
+EXISTING=$(drovr pane list 2>/dev/null | awk -v main="$MAIN_PANE" '$1 != main && $1 != "PANE_ID" && $1 != "---" {print $1}')
+if [ -n "$EXISTING" ]; then
+  for PANE in $EXISTING; do
+    herdr pane close "$PANE" >/dev/null 2>&1 || true
+  done
+  echo "Cleaned existing sub panes."
+fi
+
+echo "Main pane: $MAIN_PANE"
+echo "Spawning $NUM_AGENTS sub-agents..."
+
+# Step 1: Split main pane down (main 40% top, sub area 60% bottom)
+SUB_AREA=$(herdr pane split "$MAIN_PANE" --direction down --ratio 0.4 --no-focus 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null)
+
+if [ -z "$SUB_AREA" ]; then
+  echo "Error: Failed to split main pane" >&2
+  exit 1
+fi
+
+echo "Sub area created: $SUB_AREA"
+
+# Step 2: Split sub area into N equal panes (horizontally)
+PANES=("$SUB_AREA")
+
+for ((i=1; i<NUM_AGENTS; i++)); do
+  # Each split takes the remaining portion
+  # To get equal sizes: ratio = 1/(remaining_count)
+  REMAINING=$((NUM_AGENTS - i))
+  RATIO=$(python3 -c "print(round(1.0 / ($REMAINING + 1), 2))")
+  
+  LAST_PANE="${PANES[-1]}"
+  NEW_PANE=$(herdr pane split "$LAST_PANE" --direction right --ratio "$RATIO" --no-focus 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['pane']['pane_id'])" 2>/dev/null)
+  
+  if [ -z "$NEW_PANE" ]; then
+    echo "Warning: Failed to split pane $LAST_PANE" >&2
+    break
+  fi
+  
+  PANES+=("$NEW_PANE")
+done
+
+echo "Panes created: ${PANES[*]}"
+
+# Step 3: Run wrapper commands in each pane (wait for shell ready)
+IDX=0
+for ARG in "$@"; do
+  if [ $IDX -ge ${#PANES[@]} ]; then
+    echo "Warning: Not enough panes for all agents" >&2
+    break
+  fi
+  
+  WRAPPER="${ARG%%:*}"
+  PROMPT="${ARG#*:}"
+  PANE="${PANES[$IDX]}"
+  
+  # Wait for shell prompt to be ready
+  herdr wait output "$PANE" --match '❯' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
+  
+  echo "  [$PANE] $WRAPPER: ${PROMPT:0:40}..."
+  herdr pane run "$PANE" "${WRAPPER} ${MAIN_PANE} '${PROMPT}' && exit" || true
+  
+  ((IDX++)) || true
+done
+
+echo ""
+echo "All agents spawned. Results will be sent to $MAIN_PANE as [RETURN] messages."
+echo "Run 'drovr-spawn-multi clean' to close sub panes when done."
