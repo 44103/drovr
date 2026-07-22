@@ -44,6 +44,12 @@ Agent Commands:
   agent wait <target> --status <status> [--timeout MS]
                                      Wait for agent to reach a status
 
+Diff Commands:
+  diff start [target] [--staged] [--ratio FLOAT] [-- <pathspec...>]
+                                     Start live diff view in a new pane (idempotent)
+  diff stop                          Close the live diff pane
+  diff status                        Check if live diff pane is running
+
 General:
   status                             Show herdr connection status
   snapshot                           Show full session snapshot
@@ -600,6 +606,172 @@ cmd_agent_wait() {
   herdr agent wait "$target" "$@" 2>&1
 }
 
+# --- Diff Commands -----------------------------------------------------------
+
+DROVR_DIFF_LABEL="drovr:diff"
+
+# Find the existing diff pane by checking agent name or pane labels.
+# Returns the pane_id if found, empty string otherwise.
+_diff_find_pane() {
+  local response result
+  response=$(herdr_rpc "pane.list" '{}')
+  result=$(herdr_result "$response") || return 1
+
+  python3 - "$result" "$DROVR_DIFF_LABEL" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+label = sys.argv[2]
+panes = data.get("panes", [])
+for p in panes:
+    # Check agent name (set via herdr agent start)
+    if p.get("name", "") == label:
+        print(p["pane_id"])
+        sys.exit(0)
+    # Check pane label (set via herdr pane rename)
+    if p.get("label", "") == label:
+        print(p["pane_id"])
+        sys.exit(0)
+    # Fallback: check if terminal title contains "hunk diff"
+    title = p.get("terminal_title_stripped", "") or p.get("terminal_title", "")
+    if "hunk diff" in title and "--watch" in title:
+        print(p["pane_id"])
+        sys.exit(0)
+# Not found
+print("")
+PYTHON
+}
+
+cmd_diff_start() {
+  # Start live diff view. Idempotent: if already running, report and exit.
+
+  local ratio=""
+  local target=""
+  local pathspec=()
+  local staged=""
+  local extra_args=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ratio) ratio="$2"; shift 2 ;;
+      --staged|--cached) staged="--staged"; shift ;;
+      --) shift; pathspec=("$@"); break ;;
+      -*) extra_args+=("$1"); shift ;;
+      *)
+        if [[ -z "$target" ]]; then
+          target="$1"
+        else
+          extra_args+=("$1")
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  # Check if diff pane already exists
+  local existing_pane
+  existing_pane=$(_diff_find_pane 2>/dev/null)
+  if [[ -n "$existing_pane" ]]; then
+    echo "diff already running in pane ${existing_pane}"
+    return 0
+  fi
+
+  # 1. Get current pane dimensions via herdr pane layout
+  local layout_json
+  layout_json=$(herdr pane layout --current 2>/dev/null) || {
+    echo "Error: failed to get pane layout from herdr" >&2
+    return 1
+  }
+
+  local direction
+  direction=$(python3 - "$layout_json" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+layout = data.get("result", {}).get("layout", {})
+area = layout.get("area", {})
+width = area.get("width", 0)
+height = area.get("height", 0)
+# If width > height*2 (accounting for character aspect ratio), split right; otherwise down
+if width > height * 2:
+    print("right")
+else:
+    print("down")
+PYTHON
+  )
+
+  # 2. Build hunk command args
+  local hunk_args=("hunk" "diff")
+  if [[ -n "$staged" ]]; then
+    hunk_args+=("--staged")
+  fi
+  hunk_args+=("--watch")
+  if [[ -n "$target" ]]; then
+    hunk_args+=("$target")
+  fi
+  if [[ ${#extra_args[@]} -gt 0 ]]; then
+    hunk_args+=("${extra_args[@]}")
+  fi
+  if [[ ${#pathspec[@]} -gt 0 ]]; then
+    hunk_args+=("--")
+    hunk_args+=("${pathspec[@]}")
+  fi
+
+  # 3. Start hunk in a new pane via herdr agent start (atomic: pane creation + command)
+  local start_args=("herdr" "agent" "start" "$DROVR_DIFF_LABEL" "--split" "$direction" "--no-focus")
+  if [[ -n "$ratio" ]]; then
+    start_args+=("--ratio" "$ratio")
+  fi
+  start_args+=("--" "${hunk_args[@]}")
+
+  local output
+  output=$("${start_args[@]}" 2>&1) || {
+    echo "Error: failed to start diff pane: $output" >&2
+    return 1
+  }
+
+  local new_pane_id
+  new_pane_id=$(python3 - "$output" <<'PYTHON'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    result = data.get("result", data)
+    agent = result.get("agent", {})
+    print(agent.get("pane_id", ""))
+except (json.JSONDecodeError, KeyError):
+    print("")
+PYTHON
+  )
+
+  echo "diff started in pane ${new_pane_id} (split: ${direction})"
+  echo "  Command: ${hunk_args[*]}"
+  echo "  Stop:    drovr diff stop"
+}
+
+cmd_diff_stop() {
+  local pane_id
+  pane_id=$(_diff_find_pane 2>/dev/null)
+
+  if [[ -z "$pane_id" ]]; then
+    echo "No diff pane running"
+    return 0
+  fi
+
+  herdr pane close "$pane_id" >/dev/null 2>&1
+  echo "diff pane ${pane_id} closed"
+}
+
+cmd_diff_status() {
+  local pane_id
+  pane_id=$(_diff_find_pane 2>/dev/null)
+
+  if [[ -n "$pane_id" ]]; then
+    echo "running (pane: ${pane_id})"
+    return 0
+  else
+    echo "stopped"
+    return 1
+  fi
+}
+
 # --- General Commands --------------------------------------------------------
 
 cmd_status() {
@@ -680,6 +852,20 @@ main() {
         send) cmd_agent_send "$@" ;;
         wait) cmd_agent_wait "$@" ;;
         *) echo "Unknown agent command: $subcmd" >&2; exit 1 ;;
+      esac
+      ;;
+    diff)
+      if [[ $# -eq 0 ]]; then
+        echo "Usage: drovr diff <start|stop|status>" >&2
+        exit 1
+      fi
+      local subcmd="$1"
+      shift
+      case "$subcmd" in
+        start) cmd_diff_start "$@" ;;
+        stop) cmd_diff_stop "$@" ;;
+        status) cmd_diff_status "$@" ;;
+        *) echo "Unknown diff command: $subcmd" >&2; exit 1 ;;
       esac
       ;;
     status) cmd_status "$@" ;;

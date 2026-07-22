@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Start live diff on file save",
+      "trigger": "PostFileSave",
+      "description": "Automatically start hunk diff --watch pane on file save (idempotent)",
+      "action": {
+        "type": "command",
+        "command": "command -v drovr >/dev/null 2>&1 && [ \"${HERDR_ENV:-0}\" = \"1\" ] && drovr diff start >/dev/null 2>&1 || true",
+        "timeout": 10
+      }
+    }
+  ]
+}

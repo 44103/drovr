@@ -35,10 +35,26 @@ for wrapper in kiro-cli-sub codex-sub agy-sub drovr-spawn-multi; do
   fi
 done
 
+# --- Install hooks (kiro-cli) ------------------------------------------------
+
+echo ""
+echo "3. Installing kiro-cli hooks..."
+
+KIRO_HOOKS_DIR="${HOME}/.kiro/hooks"
+mkdir -p "$KIRO_HOOKS_DIR"
+
+for hook_file in "${SCRIPT_DIR}"/hooks/kiro/*.json; do
+  if [[ -f "$hook_file" ]]; then
+    local_name="$(basename "$hook_file")"
+    cp "$hook_file" "${KIRO_HOOKS_DIR}/${local_name}"
+    echo "   Done: ${KIRO_HOOKS_DIR}/${local_name}"
+  fi
+done
+
 # --- Verify ------------------------------------------------------------------
 
 echo ""
-echo "3. Verification..."
+echo "4. Verification..."
 if command -v drovr >/dev/null 2>&1; then
   echo "   drovr: $(drovr version)"
 else

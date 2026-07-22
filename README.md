@@ -16,6 +16,7 @@ herdr provides a Socket API for pane management and agent state reporting, but e
 ## Features
 
 - **Pane operations**: split / run / read / send / close
+- **Live diff**: auto-open `hunk diff --watch` pane for real-time change visibility
 - **Agent state report**: idle / working / blocked → herdr status bar
 - **Cross-agent spawn**: launch any AI CLI in a new herdr pane
 - **Auto-detect**: picks available CLI automatically (`$DROVR_CLI` override)
@@ -26,6 +27,7 @@ herdr provides a Socket API for pane management and agent state reporting, but e
 - bash 4+
 - python3
 - [herdr](https://herdr.dev) running
+- [hunk](https://hunk.dev) (for `drovr diff`)
 - At least one AI agent CLI (kiro-cli, codex, claude, or any)
 
 ## Install
@@ -39,6 +41,7 @@ cd ~/workspace/drovr
 This will:
 1. Place `drovr` wrapper in `~/.local/bin/`
 2. Install sub-agent wrappers (`kiro-cli-sub`, `codex-sub`, `agy-sub`, `drovr-spawn-multi`)
+3. Install agent-specific hooks (e.g., kiro-cli hooks to `~/.kiro/hooks/`)
 
 Add to PATH if needed:
 ```bash
@@ -57,6 +60,30 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 drovr status
+```
+
+### Live diff
+
+Open a `hunk diff --watch` pane that auto-reloads on file changes. Split direction (right or down) is determined automatically from the current pane dimensions.
+
+```bash
+# Start (idempotent — safe to call multiple times)
+drovr diff start
+
+# Start with a specific target
+drovr diff start main
+
+# Start with staged changes
+drovr diff start --staged
+
+# Start with specific files
+drovr diff start -- src/app.ts src/utils.ts
+
+# Check if running
+drovr diff status
+
+# Stop and close the diff pane
+drovr diff stop
 ```
 
 ### Pane operations
@@ -152,7 +179,11 @@ drovr pane read $(drovr agent list | grep codex-research | awk '{print $1}') --l
 drovr/
 ├── bin/drovr            # Main CLI entry point
 ├── lib/herdr-core.sh    # Core library (socket, pane discovery)
+├── hooks/               # Agent-specific hooks (installed globally)
+│   └── kiro/            #   kiro-cli hooks (→ ~/.kiro/hooks/)
 ├── skills/              # Agent skills (install via gh skill install)
+│   ├── herdr-subagents/ #   Parallel sub-agent spawning
+│   └── live-diff/       #   Live diff viewing
 ├── install.sh           # Installer
 ├── uninstall.sh         # Clean uninstaller
 ├── LICENSE              # MIT
@@ -181,7 +212,21 @@ drovr includes skills for herdr integration. Install them per agent as follows.
 gh skill install 44103/drovr
 ```
 
-Skills are placed in `~/.kiro/skills/herdr-subagents/`.
+Available skills:
+- **herdr-subagents** — Spawn parallel sub-agents in herdr terminal panes
+- **live-diff** — Show a live diff view alongside the working pane
+
+## Hooks
+
+drovr ships agent-specific hooks in the `hooks/` directory. These are installed globally by `install.sh`.
+
+### kiro-cli
+
+| Hook | Trigger | Description |
+|------|---------|-------------|
+| `live-diff.json` | PostFileSave | Automatically start hunk diff --watch pane on file save |
+
+Hooks are installed to `~/.kiro/hooks/` and activate on the next session start.
 
 ## License
 
