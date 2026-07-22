@@ -1,26 +1,17 @@
 # drovr
 
-Agent-agnostic bridge between AI coding agents and [herdr](https://herdr.dev).
+High-level agent collaboration patterns on [herdr](https://herdr.dev).
 
-herdr provides a Socket API for pane management and agent state reporting, but each AI tool's native integration only handles passive session registration. drovr gives **any** agent the ability to actively operate herdr — split panes, run commands, read output, spawn other agents, and report state.
+drovr is **not** a herdr wrapper. herdr (and hunk) provide their own CLIs and skills for low-level operations. drovr sits above them, providing **orchestrated behaviors** — combining multiple tools with decision logic, state management, and idempotency guarantees.
 
-## Supported Agents
+## Design Principle
 
-| Agent | Active (CLI) |
-|-------|:---|
-| kiro-cli | `drovr agent spawn --cli kiro-cli` |
-| Codex | `drovr agent spawn --cli codex` |
-| Claude Code | `drovr agent spawn --cli claude` |
-| Any CLI | `drovr agent start <name> -- <cmd>` |
+Each drovr verb encapsulates:
+- **Decision logic** (e.g., which direction to split a pane)
+- **Tool orchestration** (e.g., herdr + hunk working together)
+- **State management** (e.g., idempotent start/stop lifecycle)
 
-## Features
-
-- **Pane operations**: split / run / read / send / close
-- **Live diff**: auto-open `hunk diff --watch` pane for real-time change visibility
-- **Agent state report**: idle / working / blocked → herdr status bar
-- **Cross-agent spawn**: launch any AI CLI in a new herdr pane
-- **Auto-detect**: picks available CLI automatically (`$DROVR_CLI` override)
-- **Agent-agnostic core**: no hardcoded agent names; reads `$HERDR_AGENT`
+If something can be done with a single `herdr` or `hunk` command, drovr doesn't wrap it.
 
 ## Requirements
 
@@ -28,7 +19,7 @@ herdr provides a Socket API for pane management and agent state reporting, but e
 - python3
 - [herdr](https://herdr.dev) running
 - [hunk](https://hunk.dev) (for `drovr diff`)
-- At least one AI agent CLI (kiro-cli, codex, claude, or any)
+- At least one AI agent CLI for `drovr delegate` (kiro-cli, codex, or agy)
 
 ## Install
 
@@ -40,8 +31,7 @@ cd ~/workspace/drovr
 
 This will:
 1. Place `drovr` wrapper in `~/.local/bin/`
-2. Install sub-agent wrappers (`kiro-cli-sub`, `codex-sub`, `agy-sub`, `drovr-spawn-multi`)
-3. Install agent-specific hooks (e.g., kiro-cli hooks to `~/.kiro/hooks/`)
+2. Install kiro-cli hooks to `~/.kiro/hooks/`
 
 Add to PATH if needed:
 ```bash
@@ -54,91 +44,70 @@ export PATH="$HOME/.local/bin:$PATH"
 ./uninstall.sh
 ```
 
-## Usage
+## Verbs
 
-### Check connection
+### `diff` — Live diff view
 
-```bash
-drovr status
-```
-
-### Live diff
-
-Open a `hunk diff --watch` pane that auto-reloads on file changes. Split direction (right or down) is determined automatically from the current pane dimensions.
+Opens a `hunk diff --watch` pane that auto-reloads on file changes. Split direction is determined automatically from the current pane dimensions.
 
 ```bash
 # Start (idempotent — safe to call multiple times)
 drovr diff start
 
-# Start with a specific target
+# With a specific target
 drovr diff start main
 
-# Start with staged changes
+# Staged changes
 drovr diff start --staged
 
-# Start with specific files
+# Specific files
 drovr diff start -- src/app.ts src/utils.ts
 
-# Check if running
+# Check status
 drovr diff status
 
-# Stop and close the diff pane
+# Stop
 drovr diff stop
 ```
 
-### Pane operations
+### `delegate` — Task delegation to other agents
+
+Delegate work to AI agents running in parallel herdr panes. Results are sent back automatically.
 
 ```bash
-drovr pane list
-drovr pane split --direction right --cwd ~/project
-drovr pane run <pane_id> "make test"
-drovr pane read <pane_id> --lines 50
-drovr pane send <pane_id> "yes"
-drovr pane close <pane_id>
+# Single delegation (uses default CLI based on $HERDR_AGENT)
+drovr delegate "Review this PR"
+
+# Single delegation with explicit CLI
+drovr delegate "codex:Review this PR"
+
+# Multiple parallel delegations (auto-layout)
+drovr delegate \
+  "kiro-cli:Investigate the auth bug" \
+  "codex:Check dependency vulnerabilities" \
+  "agy:Analyze error handling patterns"
+
+# Cleanup leftover panes
+drovr delegate clean
 ```
 
-### Agent state reporting
+**CLI resolution order:**
+1. `cli:` prefix in the argument (explicit)
+2. `$DROVR_CLI` environment variable
+3. `$HERDR_AGENT` mapping (kiro→kiro-cli, codex→codex, claude/agy→agy)
+4. First available CLI in PATH
 
-```bash
-drovr agent report working --message "Implementing feature"
-drovr agent report idle
-drovr agent report blocked --message "Waiting for user"
-```
+**Supported CLIs:**
 
-### Spawn AI agents in new panes
+| CLI | Command | Best for |
+|-----|---------|----------|
+| `kiro-cli` | `kiro-cli chat --no-interactive --trust-all-tools` | General tasks, tool use |
+| `codex` | `codex exec` | Fast code generation |
+| `agy` | `agy --dangerously-skip-permissions -p` | Reasoning, analysis |
 
-```bash
-# Auto-detect CLI
-drovr agent spawn researcher -- "Investigate the auth bug"
+**Result delivery:**
 
-# Specific CLI
-drovr agent spawn reviewer --cli codex -- "Review this PR"
-drovr agent spawn frontend --cli kiro-cli --agent frontend -- "Fix responsive"
-drovr agent spawn analyst --cli claude -- "Analyze dependencies"
-
-# Monitor spawned agents
-drovr agent list
-drovr agent read researcher
-drovr agent wait researcher --status idle --timeout 300000
-```
-
-### Start arbitrary processes
-
-```bash
-drovr agent start dev-server --split down -- npm run dev
-drovr agent start tests --split right -- pytest -v
-```
-
-### Cross-agent collaboration
-
-```bash
-# Kiro delegates research to Codex
-drovr agent spawn codex-research --cli codex -- "Investigate herdr API docs"
-
-# Wait for Codex to finish, then read result
-drovr agent wait codex-research --status idle --timeout 120000
-drovr pane read $(drovr agent list | grep codex-research | awk '{print $1}') --lines 100
-```
+Results arrive as `[RETURN:cli-name]` messages in the caller pane after the agent finishes.
 
 ## Environment Variables
 
@@ -147,86 +116,63 @@ drovr pane read $(drovr agent list | grep codex-research | awk '{print $1}') --l
 | `HERDR_SOCKET_PATH` | Override herdr socket path | Auto-detect |
 | `HERDR_PANE_ID` | Override current pane ID | `herdr pane current` |
 | `HERDR_AGENT` | Agent label (set by herdr) | Auto |
-| `DROVR_CLI` | Default CLI for `agent spawn` | Auto-detect |
+| `DROVR_CLI` | Default CLI for delegate | Auto-detect |
 | `DROVR_INSTALL_DIR` | Install directory | `~/.local/bin` |
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────┐
-│ herdr (multiplexer)                              │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐      │
-│  │ pane: kiro│  │pane:codex│  │pane:claude│     │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘      │
-│       │              │              │            │
-└───────┼──────────────┼──────────────┼────────────┘
-        │              │              │
-        ▼              ▼              ▼
-   ┌─────────────────────────────────────────┐
-   │ drovr (bridge)                          │
-   │                                          │
-   │  ┌────────────┐  ┌───────────────────┐  │
-   │  │ herdr-core │  │ CLI adapters      │  │
-   │  │ (socket)   │  │ kiro/codex/claude │  │
-   │  └────────────┘  └───────────────────┘  │
-   └─────────────────────────────────────────┘
-```
 
 ## File Structure
 
 ```
 drovr/
-├── bin/drovr            # Main CLI entry point
-├── lib/herdr-core.sh    # Core library (socket, pane discovery)
-├── hooks/               # Agent-specific hooks (installed globally)
-│   └── kiro/            #   kiro-cli hooks (→ ~/.kiro/hooks/)
-├── skills/              # Agent skills (install via gh skill install)
-│   ├── herdr-subagents/ #   Parallel sub-agent spawning
-│   └── live-diff/       #   Live diff viewing
-├── install.sh           # Installer
-├── uninstall.sh         # Clean uninstaller
-├── LICENSE              # MIT
+├── bin/drovr              # Entry point (verb dispatcher)
+├── lib/
+│   ├── herdr-core.sh      # Internal: socket API, pane discovery
+│   ├── delegate-kiro-cli.sh  # Internal: kiro-cli delegate wrapper
+│   ├── delegate-codex.sh     # Internal: codex delegate wrapper
+│   └── delegate-agy.sh       # Internal: agy delegate wrapper
+├── hooks/
+│   └── kiro/              # kiro-cli hooks (→ ~/.kiro/hooks/)
+│       └── live-diff.json
+├── skills/
+│   ├── delegate/          # Delegation skill
+│   └── live-diff/         # Live diff skill
+├── notes/                 # Design notes (ephemeral)
+├── install.sh
+├── uninstall.sh
+├── LICENSE
 └── README.md
 ```
 
-## How It Differs from herdr Integrations
-
-herdr's built-in integrations (e.g., `herdr integration install codex`) are **passive** — they report session existence at startup. drovr is **active** — it lets agents:
-
-- Open new panes and run commands in them
-- Read output from other panes
-- Spawn other AI agents for parallel work
-- Dynamically update their state (working/idle/blocked)
-
-Think of herdr integrations as "hello, I exist" and drovr as "I can operate the workspace."
-
 ## Skills
 
-drovr includes skills for herdr integration. Install them per agent as follows.
-
-### Kiro CLI
+Install drovr skills for agent guidance:
 
 ```bash
-# Install directly from the GitHub repository
 gh skill install 44103/drovr
 ```
 
 Available skills:
-- **herdr-subagents** — Spawn parallel sub-agents in herdr terminal panes
-- **live-diff** — Show a live diff view alongside the working pane
+- **delegate** — Parallel task delegation to other AI agents
+- **live-diff** — Idempotent live diff view management
 
 ## Hooks
 
-drovr ships agent-specific hooks in the `hooks/` directory. These are installed globally by `install.sh`.
+Agent-specific hooks are installed globally by `install.sh`.
 
 ### kiro-cli
 
 | Hook | Trigger | Description |
 |------|---------|-------------|
-| `live-diff.json` | PostFileSave | Automatically start hunk diff --watch pane on file save |
+| `live-diff.json` | PostFileSave | Automatically start live diff pane on file save |
 
-Hooks are installed to `~/.kiro/hooks/` and activate on the next session start.
+## How It Differs from herdr/hunk
+
+| Tool | Role |
+|------|------|
+| **herdr** | Terminal multiplexer + agent state protocol |
+| **hunk** | Diff viewer with watch mode |
+| **drovr** | Orchestrates herdr + hunk + AI CLIs into reusable collaboration patterns |
+
+Use `herdr` directly for pane/agent operations. Use `hunk` directly for one-off diff viewing. Use `drovr` when you need **combined behaviors with lifecycle management**.
 
 ## License
 

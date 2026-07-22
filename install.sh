@@ -1,6 +1,6 @@
 #!/bin/bash
 # drovr installer
-# Installs drovr binary and sub-agent wrappers to PATH.
+# Installs drovr binary and agent-specific hooks.
 
 set -euo pipefail
 
@@ -23,22 +23,10 @@ WRAPPER
 chmod +x "${INSTALL_DIR}/drovr"
 echo "   Done: ${INSTALL_DIR}/drovr"
 
-# --- Install sub-agent wrappers ----------------------------------------------
-
-echo ""
-echo "2. Installing sub-agent wrappers..."
-
-for wrapper in kiro-cli-sub codex-sub agy-sub drovr-spawn-multi; do
-  if [[ -f "${SCRIPT_DIR}/bin/${wrapper}" ]]; then
-    ln -sf "${SCRIPT_DIR}/bin/${wrapper}" "${INSTALL_DIR}/${wrapper}"
-    echo "   Done: ${INSTALL_DIR}/${wrapper} -> ${SCRIPT_DIR}/bin/${wrapper}"
-  fi
-done
-
 # --- Install hooks (kiro-cli) ------------------------------------------------
 
 echo ""
-echo "3. Installing kiro-cli hooks..."
+echo "2. Installing kiro-cli hooks..."
 
 KIRO_HOOKS_DIR="${HOME}/.kiro/hooks"
 mkdir -p "$KIRO_HOOKS_DIR"
@@ -54,7 +42,7 @@ done
 # --- Verify ------------------------------------------------------------------
 
 echo ""
-echo "4. Verification..."
+echo "3. Verification..."
 if command -v drovr >/dev/null 2>&1; then
   echo "   drovr: $(drovr version)"
 else
@@ -67,11 +55,9 @@ echo ""
 echo "Installation complete!"
 echo ""
 echo "Usage:"
-echo "  drovr status                    # Check connection"
-echo "  drovr pane list                 # List panes"
-echo "  drovr agent spawn task1 -- ...  # Spawn agent in new pane"
+echo "  drovr diff start         # Start live diff view"
+echo "  drovr delegate --to codex -- \"Review this code\""
+echo "  drovr delegate multi \"kiro-cli:task1\" \"codex:task2\""
 echo ""
-echo "Sub-agent wrappers (auto-return results to caller pane):"
-echo "  herdr agent start name --split right -- kiro-cli-sub <pane-id> \"prompt\""
-echo "  herdr agent start name --split right -- codex-sub <pane-id> \"prompt\""
-echo "  herdr agent start name --split right -- agy-sub <pane-id> \"prompt\""
+echo "Skills (install separately):"
+echo "  gh skill install 44103/drovr"
