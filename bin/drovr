@@ -153,31 +153,26 @@ PYTHON
     hunk_args+=("${pathspec[@]}")
   fi
 
-  # Atomic pane creation + command launch
-  local start_args=("herdr" "agent" "start" "$DROVR_DIFF_LABEL" "--split" "$direction" "--no-focus")
+  # Step 1: Split pane
+  local split_args=("herdr" "pane" "split" "--current" "--direction" "$direction" "--no-focus")
   if [[ -n "$ratio" ]]; then
-    start_args+=("--ratio" "$ratio")
+    split_args+=("--ratio" "$ratio")
   fi
-  start_args+=("--" "${hunk_args[@]}")
-
-  local output
-  output=$("${start_args[@]}" 2>&1) || {
-    echo "Error: failed to start diff pane: $output" >&2
+  local split_output
+  split_output=$("${split_args[@]}" 2>&1) || {
+    echo "Error: failed to split pane: $split_output" >&2
     return 1
   }
-
   local new_pane_id
-  new_pane_id=$(python3 - "$output" <<'PYTHON'
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-    result = data.get("result", data)
-    agent = result.get("agent", {})
-    print(agent.get("pane_id", ""))
-except (json.JSONDecodeError, KeyError):
-    print("")
-PYTHON
-  )
+  new_pane_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['result']['pane']['pane_id'])" "$split_output" 2>/dev/null)
+
+  # Step 2: Wait for shell ready, then run command in the new pane
+  herdr pane wait-output "$new_pane_id" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
+  herdr pane run "$new_pane_id" "${hunk_args[*]}" >/dev/null 2>&1 || {
+    echo "Error: failed to run diff command in pane" >&2
+    return 1
+  }
+  herdr pane rename "$new_pane_id" "$DROVR_DIFF_LABEL" >/dev/null 2>&1
 
   echo "diff started in pane ${new_pane_id} (split: ${direction})"
   echo "  Command: ${hunk_args[*]}"
@@ -339,29 +334,22 @@ else:
 PYTHON
   )
 
-  local agent_name="${DROVR_DELEGATE_PREFIX}:${cli}:$$"
+  # Step 1: Split pane
+  local split_output
+  split_output=$(herdr pane split --current --direction "$direction" --no-focus 2>&1) || {
+    echo "Error: failed to split pane: $split_output" >&2
+    return 1
+  }
+  local new_pane_id
+  new_pane_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['result']['pane']['pane_id'])" "$split_output" 2>/dev/null)
 
-  local start_args=("herdr" "agent" "start" "$agent_name" "--split" "$direction" "--no-focus")
-  start_args+=("--" "$wrapper_path" "$return_pane" "$prompt")
-
-  local output
-  output=$("${start_args[@]}" 2>&1) || {
+  # Step 2: Wait for shell ready, then rename and run delegate
+  herdr pane wait-output "$new_pane_id" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
+  herdr pane rename "$new_pane_id" "${DROVR_DELEGATE_PREFIX}" >/dev/null 2>&1
+  herdr pane run "$new_pane_id" "${wrapper_path} ${return_pane} '${prompt}'" 2>/dev/null || {
     echo "Error: failed to start delegate: $output" >&2
     return 1
   }
-
-  local new_pane_id
-  new_pane_id=$(python3 - "$output" <<'PYTHON'
-import json, sys
-try:
-    data = json.loads(sys.argv[1])
-    result = data.get("result", data)
-    agent = result.get("agent", {})
-    print(agent.get("pane_id", ""))
-except (json.JSONDecodeError, KeyError):
-    print("")
-PYTHON
-  )
 
   echo "delegated to ${cli} in pane ${new_pane_id}"
   echo "  Prompt: ${prompt:0:60}..."
@@ -435,7 +423,7 @@ _delegate_parallel() {
     herdr pane rename "$pane" "${DROVR_DELEGATE_PREFIX}" >/dev/null 2>&1
 
     # Wait for shell ready, then run
-    herdr wait output "$pane" --match '❯' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
+    herdr pane wait-output "$pane" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
     herdr pane run "$pane" "${wrapper_path} ${return_pane} '${prompt}' && exit" 2>/dev/null || true
 
     echo "  [${pane}] ${cli}: ${prompt:0:50}..."
