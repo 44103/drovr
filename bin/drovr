@@ -27,6 +27,12 @@ Verbs:
   diff stop                          Close the live diff pane
   diff status                        Check if live diff pane is running
 
+  review start [--direction right|down] [--ratio FLOAT]
+                                     Open hunk-review.nvim in a split pane
+  review stop                        Close the review pane
+  review status                      Check if review pane is running
+  review refresh                     Refresh the review (reload git diff)
+
   delegate "<[cli:]prompt>" [...]    Delegate task(s) to agent(s)
                                      1 arg = single, N args = parallel
   delegate clean                     Close all delegate panes
@@ -213,6 +219,274 @@ cmd_diff_status() {
     echo "stopped"
     return 1
   fi
+}
+
+# =============================================================================
+# VERB: review
+# =============================================================================
+
+DROVR_REVIEW_LABEL="drovr:review"
+
+# Find the existing review pane (nvim running hunk-review.nvim) in the current workspace.
+# Priority: 1) pane labeled "drovr:review", 2) any pane running nvim in the workspace.
+_review_find_pane() {
+  local current_pane_id
+  current_pane_id=$(herdr_current_pane_id 2>/dev/null) || true
+  local current_ws="${current_pane_id%%:*}"
+
+  local response result
+  response=$(herdr_rpc "pane.list" '{}')
+  result=$(herdr_result "$response") || return 1
+
+  # First pass: find labeled pane
+  local labeled_pane
+  labeled_pane=$(python3 - "$result" "$DROVR_REVIEW_LABEL" "$current_ws" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+label = sys.argv[2]
+current_ws = sys.argv[3]
+panes = data.get("panes", [])
+for p in panes:
+    if current_ws and p.get("workspace_id", "") != current_ws:
+        continue
+    if p.get("label", "") == label or p.get("name", "") == label:
+        print(p["pane_id"])
+        sys.exit(0)
+print("")
+PYTHON
+  )
+
+  if [[ -n "$labeled_pane" ]]; then
+    echo "$labeled_pane"
+    return 0
+  fi
+
+  # Second pass: find any pane in workspace running nvim (via process-info)
+  local candidate_panes
+  candidate_panes=$(python3 - "$result" "$current_ws" "$current_pane_id" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+current_ws = sys.argv[2]
+current_pane = sys.argv[3]
+panes = data.get("panes", [])
+for p in panes:
+    pane_id = p.get("pane_id", "")
+    if pane_id == current_pane:
+        continue
+    if current_ws and p.get("workspace_id", "") != current_ws:
+        continue
+    # Skip known non-nvim panes (diff, delegate, etc.)
+    lbl = p.get("label", "") or ""
+    if lbl.startswith("drovr:") and lbl != "drovr:review":
+        continue
+    print(pane_id)
+PYTHON
+  )
+
+  if [[ -z "$candidate_panes" ]]; then
+    echo ""
+    return 0
+  fi
+
+  # Check each candidate for nvim foreground process
+  while IFS= read -r pane_id; do
+    local proc_info
+    proc_info=$(herdr pane process-info --pane "$pane_id" 2>/dev/null) || continue
+    local is_nvim
+    is_nvim=$(python3 -c "
+import json, sys
+data = json.loads(sys.argv[1])
+procs = data.get('result', {}).get('process_info', {}).get('foreground_processes', [])
+for p in procs:
+    if 'nvim' in p.get('name', '') or 'nvim' in p.get('cmdline', ''):
+        print(p.get('pane_id', '') or sys.argv[2])
+        sys.exit(0)
+print('')
+" "$proc_info" "$pane_id" 2>/dev/null)
+    if [[ -n "$is_nvim" ]]; then
+      echo "$pane_id"
+      return 0
+    fi
+  done <<< "$candidate_panes"
+
+  echo ""
+}
+
+# Send a command to the review pane's nvim instance via --server RPC.
+# This works regardless of which buffer is active (including terminal buffers).
+_review_nvim_cmd() {
+  local pane_id="$1"
+  local cmd="$2"
+
+  local nvim_socket
+  nvim_socket=$(_review_find_nvim_socket "$pane_id") || {
+    # Fallback to send-keys if socket not found
+    herdr pane send-keys "$pane_id" esc >/dev/null 2>&1 || true
+    sleep 0.1
+    herdr pane send-text "$pane_id" "$cmd" >/dev/null 2>&1
+    herdr pane send-keys "$pane_id" enter >/dev/null 2>&1
+    return 0
+  }
+
+  nvim --server "$nvim_socket" --remote-send "<C-\\><C-n>${cmd}<CR>" 2>/dev/null
+}
+
+# Find the nvim server socket for a given pane.
+# Checks the foreground process PID and its children for a socket file.
+_review_find_nvim_socket() {
+  local pane_id="$1"
+  local uid
+  uid=$(id -u)
+
+  local proc_info
+  proc_info=$(herdr pane process-info --pane "$pane_id" 2>/dev/null) || return 1
+
+  local nvim_pid
+  nvim_pid=$(python3 -c "
+import json, sys
+data = json.loads(sys.argv[1])
+procs = data.get('result', {}).get('process_info', {}).get('foreground_processes', [])
+for p in procs:
+    if 'nvim' in p.get('name', ''):
+        print(p.get('pid', ''))
+        sys.exit(0)
+print('')
+" "$proc_info" 2>/dev/null)
+
+  if [[ -z "$nvim_pid" ]]; then
+    return 1
+  fi
+
+  # Check socket at PID directly
+  local socket_path="/run/user/${uid}/nvim.${nvim_pid}.0"
+  if [[ -S "$socket_path" ]]; then
+    echo "$socket_path"
+    return 0
+  fi
+
+  # Check child processes
+  local child_pid
+  for child_pid in $(pgrep -P "$nvim_pid" 2>/dev/null); do
+    socket_path="/run/user/${uid}/nvim.${child_pid}.0"
+    if [[ -S "$socket_path" ]]; then
+      echo "$socket_path"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+cmd_review_start() {
+  local direction="right"
+  local ratio=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --direction) direction="$2"; shift 2 ;;
+      --ratio) ratio="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  # Idempotent: if already running, just send :HunkReview to refresh
+  local existing_pane
+  existing_pane=$(_review_find_pane 2>/dev/null)
+  if [[ -n "$existing_pane" ]]; then
+    _review_nvim_cmd "$existing_pane" ":HunkReview"
+    echo "review refreshed in pane ${existing_pane}"
+    return 0
+  fi
+
+  # Determine split direction from pane dimensions if not specified
+  if [[ "$direction" == "right" ]]; then
+    local layout_json
+    layout_json=$(herdr pane layout --current 2>/dev/null) || true
+    if [[ -n "$layout_json" ]]; then
+      direction=$(python3 - "$layout_json" <<'PYTHON'
+import json, sys
+data = json.loads(sys.argv[1])
+layout = data.get("result", {}).get("layout", {})
+area = layout.get("area", {})
+width = area.get("width", 0)
+height = area.get("height", 0)
+if width > height * 2:
+    print("right")
+else:
+    print("down")
+PYTHON
+      )
+    fi
+  fi
+
+  # Step 1: Split pane
+  local split_args=("herdr" "pane" "split" "--current" "--direction" "$direction" "--no-focus")
+  if [[ -n "$ratio" ]]; then
+    split_args+=("--ratio" "$ratio")
+  fi
+  local split_output
+  split_output=$("${split_args[@]}" 2>&1) || {
+    echo "Error: failed to split pane: $split_output" >&2
+    return 1
+  }
+  local new_pane_id
+  new_pane_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['result']['pane']['pane_id'])" "$split_output" 2>/dev/null)
+
+  # Step 2: Wait for shell ready, then launch nvim
+  herdr pane wait-output "$new_pane_id" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
+  herdr pane rename "$new_pane_id" "$DROVR_REVIEW_LABEL" >/dev/null 2>&1
+  herdr pane run "$new_pane_id" "nvim" >/dev/null 2>&1 || {
+    echo "Error: failed to start nvim in pane" >&2
+    return 1
+  }
+
+  # Step 3: Wait for nvim to be ready, then send :HunkReview
+  sleep 1
+  _review_nvim_cmd "$new_pane_id" ":HunkReview"
+
+  echo "review started in pane ${new_pane_id} (split: ${direction})"
+  echo "  Command: nvim -c 'HunkReview'"
+  echo "  Stop:    drovr review stop"
+  echo "  Refresh: drovr review refresh"
+}
+
+cmd_review_stop() {
+  local pane_id
+  pane_id=$(_review_find_pane 2>/dev/null)
+
+  if [[ -z "$pane_id" ]]; then
+    echo "No review pane running"
+    return 0
+  fi
+
+  herdr pane close "$pane_id" >/dev/null 2>&1
+  echo "review pane ${pane_id} closed"
+}
+
+cmd_review_status() {
+  local pane_id
+  pane_id=$(_review_find_pane 2>/dev/null)
+
+  if [[ -n "$pane_id" ]]; then
+    echo "running (pane: ${pane_id})"
+    return 0
+  else
+    echo "stopped"
+    return 1
+  fi
+}
+
+cmd_review_refresh() {
+  local pane_id
+  pane_id=$(_review_find_pane 2>/dev/null)
+
+  if [[ -z "$pane_id" ]]; then
+    echo "No review pane running. Use 'drovr review start' first." >&2
+    return 1
+  fi
+
+  _review_nvim_cmd "$pane_id" ":HunkReviewRefresh"
+  echo "review refreshed in pane ${pane_id}"
 }
 
 # =============================================================================
@@ -513,6 +787,21 @@ main() {
         stop) cmd_diff_stop "$@" ;;
         status) cmd_diff_status "$@" ;;
         *) echo "Unknown: drovr diff $subcmd" >&2; exit 1 ;;
+      esac
+      ;;
+    review)
+      if [[ $# -eq 0 ]]; then
+        echo "Usage: drovr review <start|stop|status|refresh>" >&2
+        exit 1
+      fi
+      local subcmd="$1"
+      shift
+      case "$subcmd" in
+        start) cmd_review_start "$@" ;;
+        stop) cmd_review_stop "$@" ;;
+        status) cmd_review_status "$@" ;;
+        refresh) cmd_review_refresh "$@" ;;
+        *) echo "Unknown: drovr review $subcmd" >&2; exit 1 ;;
       esac
       ;;
     delegate)

@@ -4,10 +4,10 @@
     {
       "name": "Start live diff on file save",
       "trigger": "PostFileSave",
-      "description": "Automatically start hunk diff --watch pane on file save (idempotent)",
+      "description": "On file save, use hunk-review.nvim if nvim is installed, otherwise hunk --watch. Both are idempotent.",
       "action": {
         "type": "command",
-        "command": "command -v drovr >/dev/null 2>&1 && [ \"${HERDR_ENV:-0}\" = \"1\" ] && drovr diff start >/dev/null 2>&1 || true",
+        "command": "command -v drovr >/dev/null 2>&1 && [ \"${HERDR_ENV:-0}\" = \"1\" ] && { if command -v nvim >/dev/null 2>&1; then drovr review start >/dev/null 2>&1; elif command -v hunk >/dev/null 2>&1; then drovr diff start >/dev/null 2>&1; fi; } || true",
         "timeout": 10
       }
     }
