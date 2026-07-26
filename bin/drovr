@@ -433,17 +433,13 @@ PYTHON
   local new_pane_id
   new_pane_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['result']['pane']['pane_id'])" "$split_output" 2>/dev/null)
 
-  # Step 2: Wait for shell ready, then launch nvim
+  # Step 2: Wait for shell ready, then launch nvim with HunkReview directly
   herdr pane wait-output "$new_pane_id" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
   herdr pane rename "$new_pane_id" "$DROVR_REVIEW_LABEL" >/dev/null 2>&1
-  herdr pane run "$new_pane_id" "nvim" >/dev/null 2>&1 || {
+  herdr pane run "$new_pane_id" "nvim -c HunkReview" >/dev/null 2>&1 || {
     echo "Error: failed to start nvim in pane" >&2
     return 1
   }
-
-  # Step 3: Wait for nvim to be ready, then send :HunkReview
-  sleep 1
-  _review_nvim_cmd "$new_pane_id" ":HunkReview"
 
   echo "review started in pane ${new_pane_id} (split: ${direction})"
   echo "  Command: nvim -c 'HunkReview'"
