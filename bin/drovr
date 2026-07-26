@@ -32,6 +32,7 @@ Verbs:
   review stop                        Close the review pane
   review status                      Check if review pane is running
   review refresh                     Refresh the review (reload git diff)
+  review check [--format json|text]  Get review comments from nvim
 
   delegate "<[cli:]prompt>" [...]    Delegate task(s) to agent(s)
                                      1 arg = single, N args = parallel
@@ -489,6 +490,136 @@ cmd_review_refresh() {
   echo "review refreshed in pane ${pane_id}"
 }
 
+cmd_review_check() {
+  local format="json"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --format) format="$2"; shift 2 ;;
+      --format=*) format="${1#--format=}"; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  local pane_id
+  pane_id=$(_review_find_pane 2>/dev/null)
+
+  if [[ -z "$pane_id" ]]; then
+    echo "No review pane running. Use 'drovr review start' first." >&2
+    return 1
+  fi
+
+  local nvim_socket
+  nvim_socket=$(_review_find_nvim_socket "$pane_id") || {
+    echo "Error: cannot find nvim socket for review pane ${pane_id}" >&2
+    return 1
+  }
+
+  # Trigger :HunkReviewExport in nvim, then read the export buffer content.
+  # HunkReviewExport writes JSON to a scratch buffer named "hunk-review://export".
+  nvim --server "$nvim_socket" --remote-send "<C-\\><C-n>:HunkReviewExport<CR>" 2>/dev/null
+  sleep 0.5
+
+  # Read the export buffer by having nvim write it to a temp file
+  local tmpfile
+  tmpfile=$(mktemp /tmp/drovr-review-XXXXXX.json)
+  trap "rm -f '$tmpfile'" RETURN
+
+  local rpc_result
+  rpc_result=$(nvim --server "$nvim_socket" --remote-expr "luaeval('(function() for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do local name = vim.api.nvim_buf_get_name(bufnr) if name:find(\"hunk%-review://export\") then local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false) vim.fn.writefile(lines, \"${tmpfile}\") return \"ok\" end end return \"not_found\" end)()')" 2>/dev/null)
+
+  local payload
+  if [[ "$rpc_result" != "ok" ]] || [[ ! -s "$tmpfile" ]]; then
+    echo "No review comments found. Add comments in the review pane first." >&2
+    return 1
+  fi
+  payload=$(cat "$tmpfile")
+
+  # Validate JSON and check for empty hunks
+  local validation
+  validation=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    hunks = data.get('hunks', [])
+    if not hunks:
+        print('no_comments')
+    else:
+        print('ok')
+except Exception as e:
+    print(f'parse_error: {e}')
+" "$payload" 2>/dev/null)
+
+  if [[ "$validation" == "no_comments" ]]; then
+    echo "No review comments found. Add comments in the review pane first." >&2
+    return 1
+  elif [[ "$validation" != "ok" ]]; then
+    echo "Error: ${validation}" >&2
+    return 1
+  fi
+
+  # Output based on format
+  case "$format" in
+    json)
+      # Pretty-print JSON
+      python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]), indent=2, ensure_ascii=False))" "$payload"
+      ;;
+    text)
+      # Convert to text format suitable for agent consumption
+      python3 - "$payload" <<'PYTHON'
+import json, sys
+
+data = json.loads(sys.argv[1])
+hunks = data.get("hunks", [])
+
+if not hunks:
+    print("No review comments.")
+    sys.exit(0)
+
+print("# Review Comments")
+print("")
+
+for hunk in hunks:
+    file_path = hunk.get("file", "")
+    changes = hunk.get("changes", [])
+    range_comments = hunk.get("range_comments", [])
+
+    for change in changes:
+        comment = change.get("comment", "")
+        if not comment:
+            continue
+        line = change.get("line", "?")
+        kind = change.get("kind", "mixed")
+        lines = change.get("lines", [])
+
+        print(f"## {file_path}:{line} ({kind})")
+        print(f"")
+        print(f"**Comment**: {comment}")
+        print(f"")
+        print(f"```diff")
+        for l in lines:
+            print(l)
+        print(f"```")
+        print(f"")
+
+    for rc in (range_comments or []):
+        comment = rc.get("comment", "")
+        if not comment:
+            continue
+        line = rc.get("line", "?")
+        print(f"## {file_path}:{line} (range)")
+        print(f"")
+        print(f"**Comment**: {comment}")
+        print(f"")
+PYTHON
+      ;;
+    *)
+      echo "Error: unknown format '${format}'. Use 'json' or 'text'." >&2
+      return 1
+      ;;
+  esac
+}
+
 # =============================================================================
 # VERB: delegate
 # =============================================================================
@@ -791,7 +922,7 @@ main() {
       ;;
     review)
       if [[ $# -eq 0 ]]; then
-        echo "Usage: drovr review <start|stop|status|refresh>" >&2
+        echo "Usage: drovr review <start|stop|status|refresh|check>" >&2
         exit 1
       fi
       local subcmd="$1"
@@ -801,6 +932,7 @@ main() {
         stop) cmd_review_stop "$@" ;;
         status) cmd_review_status "$@" ;;
         refresh) cmd_review_refresh "$@" ;;
+        check) cmd_review_check "$@" ;;
         *) echo "Unknown: drovr review $subcmd" >&2; exit 1 ;;
       esac
       ;;

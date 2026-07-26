@@ -70,6 +70,41 @@ drovr diff status
 drovr diff stop
 ```
 
+### `review` — Interactive code review with hunk-review.nvim
+
+Opens hunk-review.nvim in a split pane for reviewing diffs. Add comments in nvim, then the coding agent retrieves them with `check`.
+
+```bash
+# Start review pane (idempotent)
+drovr review start
+
+# Check status
+drovr review status
+
+# Retrieve review comments as JSON
+drovr review check
+
+# Retrieve as markdown text
+drovr review check --format text
+
+# Refresh review (reload git diff after code changes)
+drovr review refresh
+
+# Stop
+drovr review stop
+```
+
+**Workflow:**
+
+1. Agent (or hook) runs `drovr review start` — nvim opens with `:HunkReview`
+2. User navigates the diff, adds comments with `c` (block), line mode `c`, or visual `c`
+3. User signals ready (e.g., tells the agent "check review" or agent runs it periodically)
+4. Agent runs `drovr review check --format text` to get structured feedback
+5. Agent fixes code or answers questions based on comments
+6. Agent runs `drovr review refresh` so the user sees updated diffs
+
+**Comment retrieval** connects to nvim via `--server` RPC, so no file I/O or clipboard is needed.
+
 ### `delegate` — Task delegation to other agents
 
 Delegate work to AI agents running in parallel herdr panes. Results are sent back automatically.
@@ -134,7 +169,8 @@ drovr/
 │       └── live-diff.json
 ├── skills/
 │   ├── delegate/          # Delegation skill
-│   └── live-diff/         # Live diff skill
+│   ├── live-diff/         # Live diff skill
+│   └── review/            # Review comment retrieval skill
 ├── notes/                 # Design notes (ephemeral)
 ├── install.sh
 ├── uninstall.sh
@@ -153,6 +189,7 @@ gh skill install 44103/drovr
 Available skills:
 - **delegate** — Parallel task delegation to other AI agents
 - **live-diff** — Idempotent live diff view management
+- **review** — Retrieve and act on review comments from hunk-review.nvim
 
 ## Hooks
 
