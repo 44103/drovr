@@ -57,17 +57,27 @@ EOF
 DROVR_DIFF_LABEL="drovr:diff"
 
 # Find the existing diff pane by agent name, label, or terminal title.
+# Scoped to the current workspace only.
 _diff_find_pane() {
+  # Determine current workspace_id from pane_id (e.g. "w8:p2" -> "w8")
+  local current_pane_id
+  current_pane_id=$(herdr_current_pane_id 2>/dev/null) || true
+  local current_ws="${current_pane_id%%:*}"
+
   local response result
   response=$(herdr_rpc "pane.list" '{}')
   result=$(herdr_result "$response") || return 1
 
-  python3 - "$result" "$DROVR_DIFF_LABEL" <<'PYTHON'
+  python3 - "$result" "$DROVR_DIFF_LABEL" "$current_ws" <<'PYTHON'
 import json, sys
 data = json.loads(sys.argv[1])
 label = sys.argv[2]
+current_ws = sys.argv[3]
 panes = data.get("panes", [])
 for p in panes:
+    # Skip panes in other workspaces
+    if current_ws and p.get("workspace_id", "") != current_ws:
+        continue
     if p.get("name", "") == label:
         print(p["pane_id"])
         sys.exit(0)
