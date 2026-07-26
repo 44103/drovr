@@ -6,7 +6,7 @@ Delegate tasks to other AI agents running in parallel herdr panes, with automati
 
 - When the user asks to split work across multiple agents
 - When investigating a topic from multiple angles simultaneously
-- When the user says "delegate", "parallel", "sub-agent", "split into N parts", "他のエージェントに任せて"
+- When the user says "delegate", "parallel", "sub-agent", "split into N parts", "hand off to other agents"
 - When a task benefits from a second opinion (e.g., codex for speed, agy for reasoning)
 
 ## How It Works
@@ -67,7 +67,7 @@ Content uses `|` as line separator (original newlines replaced).
 After running `drovr delegate` or `drovr delegate multi`:
 
 1. **Do NOT poll or sleep** — results arrive as queued user messages
-2. **End your turn immediately** with a brief message like "エージェントに委譲しました。結果を待ちます。"
+2. **End your turn immediately** with a brief message like "Delegated to agents. Waiting for results."
 3. **When `[RETURN:*]` messages arrive**, collect them
 4. **Once all expected results are received**, synthesize and present to the user
 

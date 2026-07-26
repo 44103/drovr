@@ -5,7 +5,7 @@ Show a live diff view alongside the working pane so the user can see file change
 ## When to Use
 
 - After editing files, to let the user visually review diffs as they happen
-- When the user says "diff", "差分表示", "変更見せて", "live diff", "watch diff"
+- When the user says "diff", "show diff", "show changes", "live diff", "watch diff"
 - At the start of a coding session to provide continuous visual feedback
 - When making multiple file edits and want the user to track progress
 
