@@ -379,7 +379,7 @@ print('')
 }
 
 cmd_review_start() {
-  local direction="right"
+  local direction=""
   local ratio=""
 
   while [[ $# -gt 0 ]]; do
@@ -400,7 +400,12 @@ cmd_review_start() {
   fi
 
   # Determine split direction from pane dimensions if not specified
-  if [[ "$direction" == "right" ]]; then
+  # Default: up (nvim needs horizontal width)
+  # If aspect ratio > golden ratio (1.618), use right (plenty of horizontal space)
+  # Note: herdr returns character units, not pixels. Terminal fonts are typically
+  # ~2x taller than wide, so we apply a 0.5 correction factor to width.
+  local swap_up=false
+  if [[ -z "$direction" ]]; then
     local layout_json
     layout_json=$(herdr pane layout --current 2>/dev/null) || true
     if [[ -n "$layout_json" ]]; then
@@ -411,17 +416,29 @@ layout = data.get("result", {}).get("layout", {})
 area = layout.get("area", {})
 width = area.get("width", 0)
 height = area.get("height", 0)
-if width > height * 2:
+golden_ratio = 1.618
+# Correct for terminal character cell aspect ratio (~2:1 height:width)
+effective_ratio = (width * 0.5) / height if height > 0 else 0
+if effective_ratio > golden_ratio:
     print("right")
 else:
-    print("down")
+    print("up")
 PYTHON
       )
+    else
+      direction="up"
     fi
   fi
 
+  # herdr split only supports "right" and "down", so we use "down" + swap for "up"
+  local actual_direction="$direction"
+  if [[ "$direction" == "up" ]]; then
+    actual_direction="down"
+    swap_up=true
+  fi
+
   # Step 1: Split pane
-  local split_args=("herdr" "pane" "split" "--current" "--direction" "$direction" "--no-focus")
+  local split_args=("herdr" "pane" "split" "--current" "--direction" "$actual_direction" "--no-focus")
   if [[ -n "$ratio" ]]; then
     split_args+=("--ratio" "$ratio")
   fi
@@ -433,7 +450,12 @@ PYTHON
   local new_pane_id
   new_pane_id=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])['result']['pane']['pane_id'])" "$split_output" 2>/dev/null)
 
-  # Step 2: Wait for shell ready, then launch nvim with HunkReview directly
+  # Step 2: Swap panes if we wanted "up" (nvim on top)
+  if [[ "$swap_up" == "true" ]]; then
+    herdr pane swap --pane "$new_pane_id" --direction up >/dev/null 2>&1 || true
+  fi
+
+  # Step 3: Wait for shell ready, then launch nvim with HunkReview directly
   herdr pane wait-output "$new_pane_id" --regex '\S' --source visible --timeout 10000 >/dev/null 2>&1 || sleep 2
   herdr pane rename "$new_pane_id" "$DROVR_REVIEW_LABEL" >/dev/null 2>&1
   herdr pane run "$new_pane_id" "nvim -c HunkReview" >/dev/null 2>&1 || {
