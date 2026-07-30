@@ -332,6 +332,19 @@ _review_nvim_cmd() {
   nvim --server "$nvim_socket" --remote-send "<C-\\><C-n>${cmd}<CR>" 2>/dev/null
 }
 
+# Clean up [No Name] buffers that accumulate from repeated HunkReview calls.
+# These are created by nvim's tabnew command and not properly cleaned up.
+_review_cleanup_noname_buffers() {
+  local pane_id="$1"
+
+  local nvim_socket
+  nvim_socket=$(_review_find_nvim_socket "$pane_id") || return 0
+
+  # Delete all unnamed, unmodified buffers that are not displayed in any window
+  # Excludes hunk-review:// buffers (they have names) and buffers currently visible
+  nvim --server "$nvim_socket" --remote-expr "luaeval('(function() local deleted = 0; for _, buf in ipairs(vim.api.nvim_list_bufs()) do local name = vim.api.nvim_buf_get_name(buf); if name == \"\" and not vim.bo[buf].modified and vim.fn.bufwinid(buf) == -1 then pcall(vim.api.nvim_buf_delete, buf, {force = true}); deleted = deleted + 1 end end; return deleted end)()')" 2>/dev/null || true
+}
+
 # Find the nvim server socket for a given pane.
 # Checks the foreground process PID and its children for a socket file.
 _review_find_nvim_socket() {
@@ -394,6 +407,7 @@ cmd_review_start() {
   local existing_pane
   existing_pane=$(_review_find_pane 2>/dev/null)
   if [[ -n "$existing_pane" ]]; then
+    _review_cleanup_noname_buffers "$existing_pane"
     _review_nvim_cmd "$existing_pane" ":HunkReview"
     echo "review refreshed in pane ${existing_pane}"
     return 0
@@ -503,6 +517,9 @@ cmd_review_refresh() {
     echo "No review pane running. Use 'drovr review start' first." >&2
     return 1
   fi
+
+  # Clean up [No Name] buffers before refresh to prevent accumulation
+  _review_cleanup_noname_buffers "$pane_id"
 
   _review_nvim_cmd "$pane_id" ":HunkReviewRefresh"
   echo "review refreshed in pane ${pane_id}"
