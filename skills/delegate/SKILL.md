@@ -15,6 +15,58 @@ Delegate tasks to other AI agents running in parallel herdr panes, with automati
 
 For multiple delegations, `drovr delegate multi` creates a split layout (main 40% top, agents in bottom 60% equally split) and runs all agents in parallel.
 
+## Prompting Sub-agents for File Changes
+
+Sub-agents may have restricted permissions (e.g., no file write access). When delegating tasks that involve file modifications, include the fallback instruction in your prompt so the sub-agent returns changes in a structured format that you (the orchestrator) can apply.
+
+### Prompt Template for File Modifications
+
+Include this instruction when delegating tasks that may require file changes:
+
+```
+If you cannot write to files directly, return the changes in this format:
+
+[CHANGES]
+--- a/<file-path>
++++ b/<file-path>
+@@ -<line>,<count> +<line>,<count> @@
+ <context line>
+-<removed line>
++<added line>
+ <context line>
+[/CHANGES]
+
+Use unified diff format. Include 3 lines of context around each change.
+For new files, use /dev/null as the "a" path.
+For deleted files, use /dev/null as the "b" path.
+```
+
+### Example Delegation with Fallback
+
+```bash
+drovr delegate "kiro-cli:Fix the null check bug in src/auth.ts. \
+If you cannot write to files directly, return the changes in unified diff format wrapped in [CHANGES]...[/CHANGES] tags."
+```
+
+### Applying Returned Changes
+
+When a sub-agent returns `[CHANGES]...[/CHANGES]`, extract the diff and apply it:
+
+1. Parse the diff content between the tags
+2. Apply using `patch -p1` or manually edit the files
+3. Verify the changes are correct before committing
+
+Example manual application:
+```bash
+# Save the diff to a file
+cat << 'EOF' > /tmp/changes.patch
+<paste diff here>
+EOF
+
+# Apply the patch
+patch -p1 < /tmp/changes.patch
+```
+
 ## Usage
 
 ### Single delegation
